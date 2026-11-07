@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 
@@ -20,11 +21,99 @@ const TYPES = {
   ".jpg": "image/jpeg",
 };
 
-const server = http.createServer((req, res) => {
+const PHOTO_NAME = /^photo-[\w-]+\.jpg$/;
+
+async function listPhotos() {
+  const names = (await fs.promises.readdir(PHOTOS)).filter((n) => PHOTO_NAME.test(n));
+  const photos = await Promise.all(
+    names.map(async (name) => {
+      const { mtimeMs, size } = await fs.promises.stat(path.join(PHOTOS, name));
+      return { name, url: `/photos/${name}`, time: mtimeMs, size };
+    })
+  );
+  return photos.sort((a, b) => b.time - a.time);
+}
+
+// Streams an uncompressed ("stored") zip of every photo. JPEGs don't compress further,
+// so storing them is just as small and avoids a dependency.
+async function sendZip(res) {
+  const photos = await listPhotos();
+  res.writeHead(200, {
+    "Content-Type": "application/zip",
+    "Content-Disposition": `attachment; filename="photos-${new Date().toISOString().slice(0, 10)}.zip"`,
+  });
+
+  const central = [];
+  let offset = 0;
+  for (const { name, time } of photos) {
+    const data = await fs.promises.readFile(path.join(PHOTOS, name));
+    const nameBuf = Buffer.from(name);
+    const crc = zlib.crc32(data);
+    const d = new Date(time);
+    const dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    const dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); // local file header signature
+    local.writeUInt16LE(20, 4); // version needed
+    local.writeUInt16LE(dosTime, 10);
+    local.writeUInt16LE(dosDate, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18); // compressed size
+    local.writeUInt32LE(data.length, 22); // uncompressed size
+    local.writeUInt16LE(nameBuf.length, 26);
+    res.write(local);
+    res.write(nameBuf);
+    res.write(data);
+
+    const entry = Buffer.alloc(46);
+    entry.writeUInt32LE(0x02014b50, 0); // central directory header signature
+    entry.writeUInt16LE(20, 4); // version made by
+    entry.writeUInt16LE(20, 6); // version needed
+    entry.writeUInt16LE(dosTime, 12);
+    entry.writeUInt16LE(dosDate, 14);
+    entry.writeUInt32LE(crc, 16);
+    entry.writeUInt32LE(data.length, 20);
+    entry.writeUInt32LE(data.length, 24);
+    entry.writeUInt16LE(nameBuf.length, 28);
+    entry.writeUInt32LE(offset, 42); // where this file's local header starts
+    central.push(entry, nameBuf);
+    offset += local.length + nameBuf.length + data.length;
+  }
+
+  const centralBuf = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); // end of central directory signature
+  end.writeUInt16LE(photos.length, 8);
+  end.writeUInt16LE(photos.length, 10);
+  end.writeUInt32LE(centralBuf.length, 12);
+  end.writeUInt32LE(offset, 16);
+  res.end(Buffer.concat([centralBuf, end]));
+}
+
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://x");
   let pathname = decodeURIComponent(url.pathname);
+
+  try {
+    if (pathname === "/api/photos") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(await listPhotos()));
+      return;
+    }
+    if (pathname === "/photos.zip") {
+      await sendZip(res);
+      return;
+    }
+  } catch (err) {
+    console.error(err);
+    if (!res.headersSent) res.writeHead(500);
+    res.end();
+    return;
+  }
+
   if (pathname === "/") pathname = "/index.html";
-  if (pathname === "/camera" || pathname === "/remote") pathname += ".html";
+  if (["/camera", "/remote", "/gallery"].includes(pathname)) pathname += ".html";
 
   const base = pathname.startsWith("/photos/") ? __dirname : PUBLIC;
   const file = path.normalize(path.join(base, pathname));
@@ -37,7 +126,11 @@ const server = http.createServer((req, res) => {
       res.writeHead(404).end("Not found");
       return;
     }
-    res.writeHead(200, { "Content-Type": TYPES[path.extname(file)] || "application/octet-stream" });
+    const headers = { "Content-Type": TYPES[path.extname(file)] || "application/octet-stream" };
+    if (url.searchParams.has("download")) {
+      headers["Content-Disposition"] = `attachment; filename="${path.basename(file)}"`;
+    }
+    res.writeHead(200, headers);
     res.end(data);
   });
 });

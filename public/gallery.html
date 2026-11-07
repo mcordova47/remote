@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Remote Shutter · Gallery</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="gallery">
+    <header>
+      <a href="/remote">‹ Remote</a>
+      <span id="count"></span>
+      <a class="button" id="all" href="/photos.zip" hidden>Download all</a>
+    </header>
+    <p class="empty" id="empty" hidden>No photos yet.</p>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <script type="module">
+    const grid = document.getElementById("grid");
+    const count = document.getElementById("count");
+    const all = document.getElementById("all");
+    const empty = document.getElementById("empty");
+    const fmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+    async function load() {
+      const photos = await (await fetch("/api/photos")).json();
+      count.textContent = `${photos.length} photo${photos.length === 1 ? "" : "s"}`;
+      all.hidden = photos.length === 0;
+      empty.hidden = photos.length > 0;
+      grid.replaceChildren(
+        ...photos.map((p) => {
+          const tile = document.createElement("figure");
+          tile.innerHTML = `
+            <a href="${p.url}" target="_blank"><img src="${p.url}" loading="lazy" alt="" /></a>
+            <figcaption>
+              <span>${fmt.format(p.time)}</span>
+              <a href="${p.url}?download" download="${p.name}" aria-label="Download">↓</a>
+            </figcaption>`;
+          return tile;
+        })
+      );
+    }
+
+    load();
+    // Pick up photos taken since the page was opened when you come back to it.
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+  </script>
+</body>
+</html>
