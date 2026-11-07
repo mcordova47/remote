@@ -11,7 +11,10 @@
     <header>
       <a href="/remote">‹ Remote</a>
       <span id="count"></span>
-      <a class="button" id="all" href="/photos.zip" hidden>Download all</a>
+      <span class="actions" id="actions" hidden>
+        <a class="button" href="/photos.zip">Download all</a>
+        <button class="button danger" id="deleteAll">Delete all</button>
+      </span>
     </header>
     <p class="empty" id="empty" hidden>No photos yet.</p>
     <div class="grid" id="grid"></div>
@@ -20,14 +23,14 @@
   <script type="module">
     const grid = document.getElementById("grid");
     const count = document.getElementById("count");
-    const all = document.getElementById("all");
+    const actions = document.getElementById("actions");
     const empty = document.getElementById("empty");
     const fmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
     async function load() {
       const photos = await (await fetch("/api/photos")).json();
       count.textContent = `${photos.length} photo${photos.length === 1 ? "" : "s"}`;
-      all.hidden = photos.length === 0;
+      actions.hidden = photos.length === 0;
       empty.hidden = photos.length > 0;
       grid.replaceChildren(
         ...photos.map((p) => {
@@ -36,12 +39,26 @@
             <a href="${p.url}" target="_blank"><img src="${p.url}" loading="lazy" alt="" /></a>
             <figcaption>
               <span>${fmt.format(p.time)}</span>
-              <a href="${p.url}?download" download="${p.name}" aria-label="Download">↓</a>
+              <span>
+                <a href="${p.url}?download" download="${p.name}" aria-label="Download">↓</a>
+                <button class="delete" aria-label="Delete">✕</button>
+              </span>
             </figcaption>`;
+          tile.querySelector(".delete").addEventListener("click", async () => {
+            if (!confirm("Delete this photo?")) return;
+            await fetch(`/api/photos/${p.name}`, { method: "DELETE" });
+            load();
+          });
           return tile;
         })
       );
     }
+
+    document.getElementById("deleteAll").addEventListener("click", async () => {
+      if (!confirm(`Delete all ${count.textContent}? This can't be undone.`)) return;
+      await fetch("/api/photos", { method: "DELETE" });
+      load();
+    });
 
     load();
     // Pick up photos taken since the page was opened when you come back to it.

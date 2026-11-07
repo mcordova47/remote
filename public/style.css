@@ -52,10 +52,14 @@ video { max-width: 100%; max-height: 100%; transform: scaleX(-1); }
 /* gallery page */
 .gallery { width: 100%; max-width: 1200px; padding: 16px; }
 .gallery header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
-.button { padding: 8px 14px; border-radius: 18px; background: #eee; color: #111; text-decoration: none; font-size: 15px; }
+.button { padding: 8px 14px; border-radius: 18px; border: 0; background: #eee; color: #111; text-decoration: none; font-size: 15px; font-family: inherit; }
+.button.danger { background: #c33; color: #fff; }
+.actions { display: flex; gap: 8px; }
+.actions[hidden] { display: none; }
 .empty { text-align: center; opacity: 0.7; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
 .grid figure { margin: 0; background: #1c1c1c; border-radius: 8px; overflow: hidden; }
 .grid img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; }
 .grid figcaption { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; font-size: 13px; }
 .grid figcaption a { text-decoration: none; font-size: 18px; padding: 0 4px; }
+.grid figcaption .delete { background: none; border: 0; color: #f77; font-size: 15px; padding: 0 4px; cursor: pointer; }

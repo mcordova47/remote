@@ -9,7 +9,7 @@ import { WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, "public");
-const PHOTOS = path.join(__dirname, "photos");
+const PHOTOS = path.resolve(process.env.PHOTOS_DIR || path.join(__dirname, "photos"));
 const PORT = Number(process.env.PORT) || 3000;
 
 fs.mkdirSync(PHOTOS, { recursive: true });
@@ -96,6 +96,19 @@ const server = http.createServer(async (req, res) => {
   let pathname = decodeURIComponent(url.pathname);
 
   try {
+    if (req.method === "DELETE" && pathname.startsWith("/api/photos")) {
+      // DELETE /api/photos deletes every photo; DELETE /api/photos/<name> deletes one
+      const name = pathname.slice("/api/photos/".length);
+      if (name && !PHOTO_NAME.test(name)) {
+        res.writeHead(400).end();
+        return;
+      }
+      const names = name ? [name] : (await listPhotos()).map((p) => p.name);
+      await Promise.all(names.map((n) => fs.promises.rm(path.join(PHOTOS, n), { force: true })));
+      console.log(`Deleted ${names.length} photo${names.length === 1 ? "" : "s"}`);
+      res.writeHead(204).end();
+      return;
+    }
     if (pathname === "/api/photos") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(await listPhotos()));
@@ -115,8 +128,9 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/") pathname = "/index.html";
   if (["/camera", "/remote", "/gallery"].includes(pathname)) pathname += ".html";
 
-  const base = pathname.startsWith("/photos/") ? __dirname : PUBLIC;
-  const file = path.normalize(path.join(base, pathname));
+  const isPhoto = pathname.startsWith("/photos/");
+  const base = isPhoto ? PHOTOS : PUBLIC;
+  const file = path.normalize(path.join(base, isPhoto ? pathname.slice("/photos".length) : pathname));
   if (!file.startsWith(base + path.sep)) {
     res.writeHead(403).end();
     return;
