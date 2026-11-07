@@ -21,8 +21,8 @@
       <button data-d="5">5s</button>
       <button data-d="10">10s</button>
     </div>
+    <div class="saved" id="savedStatus"></div>
     <a id="lastLink" target="_blank" hidden><img class="last" id="last" alt="Last photo" /></a>
-    <a href="/gallery">Gallery</a>
   </div>
 
   <script type="module">
@@ -32,6 +32,7 @@
     const statusEl = document.getElementById("status");
     const last = document.getElementById("last");
     const lastLink = document.getElementById("lastLink");
+    const savedStatus = document.getElementById("savedStatus");
     let connected = false;
     let cameras = 0;
     let delay = 0;
@@ -127,6 +128,15 @@
           last.src = msg.url;
           lastLink.href = msg.url;
           lastLink.hidden = false;
+          savedStatus.className = "saved";
+          savedStatus.textContent = msg.toPhotos ? "Adding to Photos…" : "Saved on the Mac";
+        }
+        if (msg.type === "saved") {
+          shutter.textContent = "Snap";
+          if (lastLink.href.endsWith(msg.url) || !msg.ok) {
+            savedStatus.className = `saved ${msg.ok ? "ok" : "err"}`;
+            savedStatus.textContent = msg.ok ? "✓ Saved to Photos" : msg.error;
+          }
         }
       },
       (ok) => {

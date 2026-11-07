@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
-import zlib from "node:zlib";
+import { execFile } from "node:child_process";
 import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
 import { WebSocketServer } from "ws";
 import qrcode from "qrcode-terminal";
@@ -22,74 +22,37 @@ const TYPES = {
   ".jpg": "image/jpeg",
 };
 
-const PHOTO_NAME = /^photo-[\w-]+\.jpg$/;
+// --- Saving to Photos ---
+// Each photo is imported into a "Remote Shutter" album in the Mac's Photos app (and from
+// there syncs to your phone if iCloud Photos is on). The file in photos/ is kept as a
+// backup. The first import makes macOS ask whether this terminal may control Photos.
+const ALBUM = process.env.PHOTOS_ALBUM || "Remote Shutter";
+const SAVE_TO_PHOTOS = process.platform === "darwin" && process.env.SAVE_TO_PHOTOS !== "0";
+const IMPORT_SCRIPT = [
+  "on run argv",
+  "  set f to (POSIX file (item 1 of argv)) as alias",
+  '  tell application "Photos"',
+  "    if not (exists album (item 2 of argv)) then make new album named (item 2 of argv)",
+  "    import {f} into album (item 2 of argv) skip check duplicates true",
+  "  end tell",
+  "end run",
+];
 
-async function listPhotos() {
-  const names = (await fs.promises.readdir(PHOTOS)).filter((n) => PHOTO_NAME.test(n));
-  const photos = await Promise.all(
-    names.map(async (name) => {
-      const { mtimeMs, size } = await fs.promises.stat(path.join(PHOTOS, name));
-      return { name, url: `/photos/${name}`, time: mtimeMs, size };
-    })
-  );
-  return photos.sort((a, b) => b.time - a.time);
-}
+// Imports run one at a time so quick bursts of shots don't race each other.
+let importQueue = Promise.resolve();
 
-// Streams an uncompressed ("stored") zip of every photo. JPEGs don't compress further,
-// so storing them is just as small and avoids a dependency.
-async function sendZip(res) {
-  const photos = await listPhotos();
-  res.writeHead(200, {
-    "Content-Type": "application/zip",
-    "Content-Disposition": `attachment; filename="photos-${new Date().toISOString().slice(0, 10)}.zip"`,
-  });
-
-  const central = [];
-  let offset = 0;
-  for (const { name, time } of photos) {
-    const data = await fs.promises.readFile(path.join(PHOTOS, name));
-    const nameBuf = Buffer.from(name);
-    const crc = zlib.crc32(data);
-    const d = new Date(time);
-    const dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
-    const dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
-
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0); // local file header signature
-    local.writeUInt16LE(20, 4); // version needed
-    local.writeUInt16LE(dosTime, 10);
-    local.writeUInt16LE(dosDate, 12);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(data.length, 18); // compressed size
-    local.writeUInt32LE(data.length, 22); // uncompressed size
-    local.writeUInt16LE(nameBuf.length, 26);
-    res.write(local);
-    res.write(nameBuf);
-    res.write(data);
-
-    const entry = Buffer.alloc(46);
-    entry.writeUInt32LE(0x02014b50, 0); // central directory header signature
-    entry.writeUInt16LE(20, 4); // version made by
-    entry.writeUInt16LE(20, 6); // version needed
-    entry.writeUInt16LE(dosTime, 12);
-    entry.writeUInt16LE(dosDate, 14);
-    entry.writeUInt32LE(crc, 16);
-    entry.writeUInt32LE(data.length, 20);
-    entry.writeUInt32LE(data.length, 24);
-    entry.writeUInt16LE(nameBuf.length, 28);
-    entry.writeUInt32LE(offset, 42); // where this file's local header starts
-    central.push(entry, nameBuf);
-    offset += local.length + nameBuf.length + data.length;
-  }
-
-  const centralBuf = Buffer.concat(central);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0); // end of central directory signature
-  end.writeUInt16LE(photos.length, 8);
-  end.writeUInt16LE(photos.length, 10);
-  end.writeUInt32LE(centralBuf.length, 12);
-  end.writeUInt32LE(offset, 16);
-  res.end(Buffer.concat([centralBuf, end]));
+function importToPhotos(file) {
+  const run = () =>
+    new Promise((resolve, reject) => {
+      const args = [...IMPORT_SCRIPT.flatMap((line) => ["-e", line]), file, ALBUM];
+      // Long timeout: the first run waits on the macOS permission prompt.
+      execFile("osascript", args, { timeout: 120_000 }, (err, _out, stderr) =>
+        err ? reject(new Error(stderr.trim() || err.message)) : resolve()
+      );
+    });
+  const result = importQueue.then(run);
+  importQueue = result.catch(() => {});
+  return result;
 }
 
 // --- Access key ---
@@ -156,38 +119,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  try {
-    if (req.method === "DELETE" && pathname.startsWith("/api/photos")) {
-      // DELETE /api/photos deletes every photo; DELETE /api/photos/<name> deletes one
-      const name = pathname.slice("/api/photos/".length);
-      if (name && !PHOTO_NAME.test(name)) {
-        res.writeHead(400).end();
-        return;
-      }
-      const names = name ? [name] : (await listPhotos()).map((p) => p.name);
-      await Promise.all(names.map((n) => fs.promises.rm(path.join(PHOTOS, n), { force: true })));
-      console.log(`Deleted ${names.length} photo${names.length === 1 ? "" : "s"}`);
-      res.writeHead(204).end();
-      return;
-    }
-    if (pathname === "/api/photos") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(await listPhotos()));
-      return;
-    }
-    if (pathname === "/photos.zip") {
-      await sendZip(res);
-      return;
-    }
-  } catch (err) {
-    console.error(err);
-    if (!res.headersSent) res.writeHead(500);
-    res.end();
-    return;
-  }
-
   if (pathname === "/") pathname = "/index.html";
-  if (["/camera", "/remote", "/gallery"].includes(pathname)) pathname += ".html";
+  if (["/camera", "/remote"].includes(pathname)) pathname += ".html";
 
   const isPhoto = pathname.startsWith("/photos/");
   const base = isPhoto ? PHOTOS : PUBLIC;
@@ -201,11 +134,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404).end("Not found");
       return;
     }
-    const headers = { "Content-Type": TYPES[path.extname(file)] || "application/octet-stream" };
-    if (url.searchParams.has("download")) {
-      headers["Content-Disposition"] = `attachment; filename="${path.basename(file)}"`;
-    }
-    res.writeHead(200, headers);
+    res.writeHead(200, { "Content-Type": TYPES[path.extname(file)] || "application/octet-stream" });
     res.end(data);
   });
 });
@@ -283,10 +212,27 @@ wss.on("connection", (ws, req) => {
     } else if (ws.role === "camera" && msg.type === "photo" && typeof msg.data === "string") {
       const b64 = msg.data.replace(/^data:image\/jpeg;base64,/, "");
       const name = `photo-${new Date().toISOString().replace(/[:.]/g, "-")}.jpg`;
-      fs.writeFile(path.join(PHOTOS, name), Buffer.from(b64, "base64"), (err) => {
-        if (err) console.error("Failed to save photo:", err);
-        else console.log(`Saved photos/${name}`);
-        broadcast(ws.room, "remote", { type: "photo", url: `/photos/${name}` });
+      const file = path.join(PHOTOS, name);
+      const url = `/photos/${name}`;
+      fs.writeFile(file, Buffer.from(b64, "base64"), (err) => {
+        if (err) {
+          console.error("Failed to save photo:", err);
+          broadcast(ws.room, "remote", { type: "saved", url, ok: false, error: "Couldn't save the photo" });
+          return;
+        }
+        broadcast(ws.room, "remote", { type: "photo", url, toPhotos: SAVE_TO_PHOTOS });
+        if (!SAVE_TO_PHOTOS) return console.log(`Saved photos/${name}`);
+        importToPhotos(file).then(
+          () => {
+            console.log(`Saved photos/${name} and added it to the "${ALBUM}" album in Photos`);
+            broadcast(ws.room, "remote", { type: "saved", url, ok: true });
+          },
+          (e) => {
+            console.error(`Saved photos/${name}, but couldn't add it to Photos: ${e.message}`);
+            console.error("If macOS blocked it: System Settings › Privacy & Security › Automation › allow this terminal to control Photos.");
+            broadcast(ws.room, "remote", { type: "saved", url, ok: false, error: "Couldn't add to Photos (saved on the Mac)" });
+          }
+        );
       });
     }
   });
@@ -322,5 +268,6 @@ server.listen(PORT, () => {
   console.log(`\nRemote: scan with your phone (new code every run)\n`);
   qrcode.generate(remoteUrl, { small: true }, (qr) => console.log(qr));
   console.log(`${remoteUrl}\n`);
-  console.log(`Photos are saved to ${PHOTOS}\n`);
+  if (SAVE_TO_PHOTOS) console.log(`Photos go to the "${ALBUM}" album in Photos (copies kept in ${PHOTOS})\n`);
+  else console.log(`Photos are saved to ${PHOTOS}\n`);
 });
