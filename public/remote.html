@@ -9,6 +9,11 @@
 <body>
   <div class="remote">
     <div class="status" id="status"><span class="dot"></span>Connecting…</div>
+    <div class="preview">
+      <video id="live" autoplay playsinline muted hidden></video>
+      <img id="frames" alt="" hidden />
+      <span class="mode" id="mode"></span>
+    </div>
     <button class="shutter" id="shutter" disabled>Snap</button>
     <div class="delays" id="delays">
       <button data-d="0" class="sel">Now</button>
@@ -30,6 +35,70 @@
     let cameras = 0;
     let delay = 0;
 
+    // --- Preview: try WebRTC first, fall back to JPEG frames over the WebSocket ---
+    const live = document.getElementById("live");
+    const frames = document.getElementById("frames");
+    const modeEl = document.getElementById("mode");
+    let pc = null;
+    let previewMode = null; // null | "connecting" | "webrtc" | "jpeg"
+    let fallbackTimer = null;
+
+    function setMode(mode) {
+      previewMode = mode;
+      live.hidden = mode !== "webrtc";
+      frames.hidden = mode !== "jpeg";
+      modeEl.textContent = { connecting: "Connecting preview…", webrtc: "Live", jpeg: "Preview (JPEG)" }[mode] || "";
+    }
+
+    function stopPreview() {
+      clearTimeout(fallbackTimer);
+      pc?.close();
+      pc = null;
+      if (previewMode === "jpeg") conn.send({ type: "preview", mode: "off" });
+      live.srcObject = null;
+      frames.removeAttribute("src");
+      setMode(null);
+    }
+
+    function useJpeg() {
+      clearTimeout(fallbackTimer);
+      pc?.close();
+      pc = null;
+      conn.send({ type: "preview", mode: "jpeg" });
+      setMode("jpeg");
+    }
+
+    async function startPreview() {
+      if (previewMode) return;
+      if (!window.RTCPeerConnection) return useJpeg();
+      setMode("connecting");
+      try {
+        const myPc = (pc = new RTCPeerConnection({ iceServers: [] }));
+        myPc.addTransceiver("video", { direction: "recvonly" });
+        myPc.ontrack = (e) => { live.srcObject = e.streams[0] || new MediaStream([e.track]); };
+        myPc.onicecandidate = (e) => {
+          if (e.candidate) conn.send({ type: "signal", data: { type: "ice", candidate: e.candidate } });
+        };
+        myPc.onconnectionstatechange = () => {
+          if (pc !== myPc) return;
+          if (myPc.connectionState === "connected") { clearTimeout(fallbackTimer); setMode("webrtc"); }
+          if (myPc.connectionState === "failed") useJpeg();
+        };
+        await myPc.setLocalDescription(await myPc.createOffer());
+        conn.send({ type: "signal", data: { type: "offer", sdp: myPc.localDescription } });
+        fallbackTimer = setTimeout(() => { if (previewMode === "connecting") useJpeg(); }, 6000);
+      } catch (err) {
+        console.warn("WebRTC unavailable, using JPEG preview:", err);
+        useJpeg();
+      }
+    }
+
+    async function onSignal(data) {
+      if (!pc) return;
+      if (data.type === "answer") await pc.setRemoteDescription(data.sdp);
+      if (data.type === "ice") await pc.addIceCandidate(data.candidate).catch(() => {});
+    }
+
     function render() {
       const ready = connected && cameras > 0;
       shutter.disabled = !ready;
@@ -43,7 +112,14 @@
     const conn = connect(
       "remote",
       (msg) => {
-        if (msg.type === "presence") { cameras = msg.cameras; render(); }
+        if (msg.type === "presence") {
+          cameras = msg.cameras;
+          render();
+          if (cameras > 0) startPreview();
+          else stopPreview();
+        }
+        if (msg.type === "signal") onSignal(msg.data).catch((e) => console.warn("WebRTC:", e));
+        if (msg.type === "frame" && previewMode === "jpeg") frames.src = msg.data;
         if (msg.type === "countdown") shutter.textContent = msg.remaining;
         if (msg.type === "photo") {
           shutter.textContent = "Snap";
@@ -52,7 +128,11 @@
           lastLink.hidden = false;
         }
       },
-      (ok) => { connected = ok; render(); }
+      (ok) => {
+        connected = ok;
+        render();
+        if (!ok) stopPreview();
+      }
     );
 
     shutter.addEventListener("click", () => {

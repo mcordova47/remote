@@ -31,23 +31,79 @@
         : `<span class="dot"></span>Disconnected, retrying…`;
     }
 
+    const streamReady = navigator.mediaDevices
+      .getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false })
+      .then((stream) => (video.srcObject = stream))
+      .catch((err) => {
+        statusEl.textContent = `Camera unavailable: ${err.message}. Open this page via http://localhost.`;
+        throw err;
+      });
+
+    // --- WebRTC live preview: one peer connection per remote, keyed by its id ---
+    const pcs = new Map();
+
+    function closePeer(id) {
+      pcs.get(id)?.close();
+      pcs.delete(id);
+    }
+
+    async function onSignal(from, data) {
+      if (data.type === "offer") {
+        closePeer(from);
+        const pc = new RTCPeerConnection({ iceServers: [] });
+        pcs.set(from, pc);
+        pc.onicecandidate = (e) => {
+          if (e.candidate) conn.send({ type: "signal", to: from, data: { type: "ice", candidate: e.candidate } });
+        };
+        pc.onconnectionstatechange = () => {
+          if (["failed", "closed"].includes(pc.connectionState)) closePeer(from);
+        };
+        const stream = await streamReady;
+        for (const track of stream.getVideoTracks()) pc.addTrack(track, stream);
+        await pc.setRemoteDescription(data.sdp);
+        await pc.setLocalDescription(await pc.createAnswer());
+        conn.send({ type: "signal", to: from, data: { type: "answer", sdp: pc.localDescription } });
+      } else if (data.type === "ice") {
+        await pcs.get(from)?.addIceCandidate(data.candidate).catch(() => {});
+      }
+    }
+
+    // --- JPEG fallback preview: small frames over the WebSocket while anyone wants them ---
+    const frameCanvas = document.createElement("canvas");
+    let frameTimer = null;
+
+    function setJpegViewers(count) {
+      if (count > 0 && !frameTimer) {
+        frameTimer = setInterval(() => {
+          if (!video.videoWidth || conn.buffered > 256 * 1024) return; // skip if the network is behind
+          frameCanvas.width = 640;
+          frameCanvas.height = Math.round((640 * video.videoHeight) / video.videoWidth);
+          frameCanvas.getContext("2d").drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+          conn.send({ type: "frame", data: frameCanvas.toDataURL("image/jpeg", 0.6) });
+        }, 100);
+      } else if (count === 0 && frameTimer) {
+        clearInterval(frameTimer);
+        frameTimer = null;
+      }
+    }
+
     const conn = connect(
       "camera",
       (msg) => {
         if (msg.type === "presence") { remotes = msg.remotes; renderStatus(); }
         if (msg.type === "shoot") shoot(msg.delay);
+        if (msg.type === "signal") onSignal(msg.from, msg.data).catch((e) => console.warn("WebRTC:", e));
+        if (msg.type === "peerLeft") closePeer(msg.id);
+        if (msg.type === "jpegViewers") setJpegViewers(msg.count);
       },
-      (ok) => { connected = ok; renderStatus(); }
+      (ok) => {
+        connected = ok;
+        renderStatus();
+        if (!ok) { for (const id of [...pcs.keys()]) closePeer(id); setJpegViewers(0); }
+      }
     );
 
-    try {
-      video.srcObject = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false,
-      });
-    } catch (err) {
-      statusEl.textContent = `Camera unavailable: ${err.message}. Open this page via http://localhost.`;
-    }
+    await streamReady.catch(() => {});
 
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

@@ -18,6 +18,9 @@ export function connect(role, onMessage, onStatus) {
 
   return {
     room,
+    get buffered() {
+      return ws.bufferedAmount;
+    },
     send(msg) {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
     },
