@@ -4,8 +4,9 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
 import { WebSocketServer } from "ws";
+import qrcode from "qrcode-terminal";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(__dirname, "public");
@@ -91,9 +92,69 @@ async function sendZip(res) {
   res.end(Buffer.concat([centralBuf, end]));
 }
 
+// --- Access key ---
+// A new random key every run. Phones get it by scanning the QR code printed at startup,
+// which sets a cookie; restarting the server invalidates every old cookie. Requests made
+// directly on this Mac (localhost) don't need it, so the camera page just works.
+const KEY = randomBytes(18).toString("base64url");
+const COOKIE = "rs_key";
+
+function isLocal(req) {
+  const addr = req.socket.remoteAddress;
+  const host = (req.headers.host || "").replace(/:\d+$/, "");
+  return (
+    ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(addr) &&
+    ["localhost", "127.0.0.1", "[::1]"].includes(host) &&
+    !req.headers["x-forwarded-for"] // a tunnel (e.g. cloudflared) also connects from localhost
+  );
+}
+
+function keyMatches(value) {
+  const a = Buffer.from(value || "");
+  const b = Buffer.from(KEY);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function cookieKey(req) {
+  return (req.headers.cookie || "").match(new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`))?.[1];
+}
+
+function authorized(req) {
+  return isLocal(req) || keyMatches(cookieKey(req));
+}
+
+const LOCKED_PAGE = `<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote Shutter</title>
+<body style="background:#111;color:#eee;font-family:-apple-system,system-ui,sans-serif;text-align:center;padding:48px 24px">
+<h1 style="font-size:22px">Scan to connect</h1>
+<p>Scan the QR code shown in the terminal where the server is running.</p>`;
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://x");
   let pathname = decodeURIComponent(url.pathname);
+
+  // Visiting any page with ?key=<KEY> (the QR code link) logs this device in.
+  if (url.searchParams.has("key")) {
+    url.searchParams.delete("key");
+    const location = url.pathname + url.search;
+    if (keyMatches(new URL(req.url, "http://x").searchParams.get("key"))) {
+      res.writeHead(302, {
+        "Set-Cookie": `${COOKIE}=${KEY}; Path=/; HttpOnly; SameSite=Lax`,
+        Location: location,
+      });
+    } else {
+      res.writeHead(302, { Location: location });
+    }
+    res.end();
+    return;
+  }
+
+  if (!authorized(req)) {
+    const wantsPage = (req.headers.accept || "").includes("text/html");
+    res.writeHead(401, { "Content-Type": wantsPage ? "text/html; charset=utf-8" : "text/plain" });
+    res.end(wantsPage ? LOCKED_PAGE : "Unauthorized");
+    return;
+  }
 
   try {
     if (req.method === "DELETE" && pathname.startsWith("/api/photos")) {
@@ -152,7 +213,11 @@ const server = http.createServer(async (req, res) => {
 // rooms: name -> Set<ws>; each ws has .id, .role ("camera" | "remote"), .room,
 // and (remotes only) .jpeg = true when it wants fallback JPEG preview frames
 const rooms = new Map();
-const wss = new WebSocketServer({ server, maxPayload: 20 * 1024 * 1024 });
+const wss = new WebSocketServer({
+  server,
+  maxPayload: 20 * 1024 * 1024,
+  verifyClient: ({ req }) => authorized(req),
+});
 
 function peers(room) {
   return rooms.get(room) || new Set();
@@ -238,17 +303,24 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-function lanAddresses() {
-  return Object.values(os.networkInterfaces())
-    .flat()
-    .filter((i) => i && i.family === "IPv4" && !i.internal)
-    .map((i) => i.address);
+// The address the phone should use. Skips virtual adapters that VM/container tools
+// (bridge*, vmnet*, docker*) and VPNs (utun*) create, which a phone can't reach.
+// Set REMOTE_HOST to override.
+function lanAddress() {
+  if (process.env.REMOTE_HOST) return process.env.REMOTE_HOST;
+  const virtual = /^(bridge|utun|vmnet|docker|veth|llw|awdl|tun|tap)/;
+  const candidates = Object.entries(os.networkInterfaces())
+    .filter(([name]) => !virtual.test(name))
+    .flatMap(([, addrs]) => addrs)
+    .filter((i) => i && i.family === "IPv4" && !i.internal);
+  return candidates[0]?.address || "localhost";
 }
 
 server.listen(PORT, () => {
-  console.log(`\nCamera (open on your Mac):  http://localhost:${PORT}/camera`);
-  for (const ip of lanAddresses()) {
-    console.log(`Remote (open on your phone): http://${ip}:${PORT}/remote`);
-  }
-  console.log(`\nPhotos are saved to ${PHOTOS}\n`);
+  const remoteUrl = `http://${lanAddress()}:${PORT}/remote?key=${KEY}`;
+  console.log(`\nCamera (open on this Mac): http://localhost:${PORT}/camera`);
+  console.log(`\nRemote: scan with your phone (new code every run)\n`);
+  qrcode.generate(remoteUrl, { small: true }, (qr) => console.log(qr));
+  console.log(`${remoteUrl}\n`);
+  console.log(`Photos are saved to ${PHOTOS}\n`);
 });
