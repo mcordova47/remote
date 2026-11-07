@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Remote Shutter · Camera</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="status" id="status"><span class="dot"></span>Connecting…</div>
+  <div class="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <div class="overlay" id="overlay"></div>
+    <div class="flash" id="flash"></div>
+  </div>
+
+  <script type="module">
+    import { connect } from "/shared.js";
+
+    const video = document.getElementById("video");
+    const overlay = document.getElementById("overlay");
+    const flash = document.getElementById("flash");
+    const statusEl = document.getElementById("status");
+    let connected = false;
+    let remotes = 0;
+    let busy = false;
+
+    function renderStatus() {
+      statusEl.innerHTML = connected
+        ? `<span class="dot on"></span>Camera ready · ${remotes} remote${remotes === 1 ? "" : "s"} connected`
+        : `<span class="dot"></span>Disconnected, retrying…`;
+    }
+
+    const conn = connect(
+      "camera",
+      (msg) => {
+        if (msg.type === "presence") { remotes = msg.remotes; renderStatus(); }
+        if (msg.type === "shoot") shoot(msg.delay);
+      },
+      (ok) => { connected = ok; renderStatus(); }
+    );
+
+    try {
+      video.srcObject = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false,
+      });
+    } catch (err) {
+      statusEl.textContent = `Camera unavailable: ${err.message}. Open this page via http://localhost.`;
+    }
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    async function shoot(delay) {
+      if (busy || !video.videoWidth) return;
+      busy = true;
+      for (let s = delay; s > 0; s--) {
+        overlay.textContent = s;
+        conn.send({ type: "countdown", remaining: s });
+        await sleep(1000);
+      }
+      overlay.textContent = "";
+
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext("2d").drawImage(video, 0, 0);
+      conn.send({ type: "photo", data: canvas.toDataURL("image/jpeg", 0.92) });
+
+      flash.classList.add("go");
+      requestAnimationFrame(() => requestAnimationFrame(() => flash.classList.remove("go")));
+      busy = false;
+    }
+  </script>
+</body>
+</html>

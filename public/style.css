@@ -1,0 +1,38 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: #111;
+  color: #eee;
+  font-family: -apple-system, system-ui, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  -webkit-tap-highlight-color: transparent;
+}
+a { color: #8cf; }
+.status { font-size: 14px; padding: 12px; opacity: 0.8; text-align: center; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #c33; margin-right: 6px; }
+.dot.on { background: #3c6; }
+
+/* camera page */
+.stage { position: relative; flex: 1; width: 100%; display: flex; align-items: center; justify-content: center; min-height: 0; }
+video { max-width: 100%; max-height: 100%; transform: scaleX(-1); }
+.overlay {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 30vmin; font-weight: 700; color: #fff; text-shadow: 0 0 30px #000; pointer-events: none;
+}
+.flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity 0.4s; }
+.flash.go { opacity: 1; transition: none; }
+
+/* remote page */
+.remote { width: 100%; max-width: 480px; padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 20px; }
+.shutter {
+  width: 180px; height: 180px; border-radius: 50%; border: 8px solid #eee; background: #e33;
+  color: #fff; font-size: 22px; font-weight: 600; margin-top: 24px;
+}
+.shutter:active { transform: scale(0.96); }
+.shutter:disabled { background: #555; }
+.delays { display: flex; gap: 8px; }
+.delays button { padding: 8px 14px; border-radius: 18px; border: 1px solid #555; background: #222; color: #eee; font-size: 15px; }
+.delays button.sel { background: #eee; color: #111; }
+.last { width: 100%; border-radius: 8px; }

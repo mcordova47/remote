@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Remote Shutter · Remote</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="remote">
+    <div class="status" id="status"><span class="dot"></span>Connecting…</div>
+    <button class="shutter" id="shutter" disabled>Snap</button>
+    <div class="delays" id="delays">
+      <button data-d="0" class="sel">Now</button>
+      <button data-d="3">3s</button>
+      <button data-d="5">5s</button>
+      <button data-d="10">10s</button>
+    </div>
+    <a id="lastLink" target="_blank" hidden><img class="last" id="last" alt="Last photo" /></a>
+  </div>
+
+  <script type="module">
+    import { connect } from "/shared.js";
+
+    const shutter = document.getElementById("shutter");
+    const statusEl = document.getElementById("status");
+    const last = document.getElementById("last");
+    const lastLink = document.getElementById("lastLink");
+    let connected = false;
+    let cameras = 0;
+    let delay = 0;
+
+    function render() {
+      const ready = connected && cameras > 0;
+      shutter.disabled = !ready;
+      statusEl.innerHTML = !connected
+        ? `<span class="dot"></span>Disconnected, retrying…`
+        : cameras
+          ? `<span class="dot on"></span>Camera connected`
+          : `<span class="dot"></span>Waiting for camera…`;
+    }
+
+    const conn = connect(
+      "remote",
+      (msg) => {
+        if (msg.type === "presence") { cameras = msg.cameras; render(); }
+        if (msg.type === "countdown") shutter.textContent = msg.remaining;
+        if (msg.type === "photo") {
+          shutter.textContent = "Snap";
+          last.src = msg.url;
+          lastLink.href = msg.url;
+          lastLink.hidden = false;
+        }
+      },
+      (ok) => { connected = ok; render(); }
+    );
+
+    shutter.addEventListener("click", () => {
+      conn.send({ type: "shoot", delay });
+      navigator.vibrate?.(30);
+    });
+
+    document.getElementById("delays").addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      delay = Number(b.dataset.d);
+      for (const x of e.currentTarget.children) x.classList.toggle("sel", x === b);
+    });
+  </script>
+</body>
+</html>
